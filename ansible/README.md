@@ -6,15 +6,18 @@ Method A: Run directly on your server
 If you already SSH'd into your server, run these two commands:
 
 Syntax Check (Optional):
-
+~~~~
 Bash
 ansible-playbook install_apps.yml --syntax-check
+~~~~
 Execute the Playbook:
-
+~~~
 Bash
 sudo ansible-playbook install_apps.yml
+~~~
 Apply Docker Permissions:
 After running, refresh your group permissions so you can run Docker without sudo:
-
+~~~~
 Bash
 newgrp docker
+~~~~
