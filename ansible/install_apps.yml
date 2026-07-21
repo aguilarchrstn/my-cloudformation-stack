@@ -1,0 +1,84 @@
+---
+- name: Auto-Install Development & System Stack
+  hosts: localhost
+  connection: local
+  become: true
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install prerequisite packages, psql, plocate, and tools
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - software-properties-common
+          - git
+          - postgresql-client
+          - plocate
+        state: present
+
+    # --- DOCKER SETUP ---
+    - name: Create directory for Docker GPG keyring
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download Docker official GPG key
+      get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: '0644'
+
+    - name: Add Docker official repository
+      apt_repository:
+        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+
+    - name: Install Docker and Docker Compose Plugin
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
+
+    - name: Ensure Docker service is running and enabled
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add current user to docker group
+      user:
+        name: "{{ ansible_env.SUDO_USER | default(ansible_user_id) }}"
+        groups: docker
+        append: yes
+
+    # --- CTOP SETUP ---
+    - name: Fetch latest ctop release metadata
+      uri:
+        url: https://api.github.com/repos/bcicen/ctop/releases/latest
+        return_content: yes
+      register: ctop_release
+
+    - name: Download and install latest ctop binary
+      get_url:
+        url: "{{ ctop_release.json.assets | selectattr('name', 'equalto', 'ctop-' + ctop_release.json.tag_name[1:] + '-linux-amd64') | map(attribute='browser_download_url') | first }}"
+        dest: /usr/local/bin/ctop
+        mode: '0755'
+
+    # --- SYSTEM INITIALIZATION ---
+    - name: Build plocate database index
+      command: updatedb
+      changed_when: false
