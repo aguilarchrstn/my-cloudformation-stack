@@ -1,0 +1,89 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Launch an Ubuntu 22.04 LTS EC2 instance with 10GB storage and auto-installed Ansible.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-00007f478f5d6c945
+    Description: Existing VPC ID (my-project-vpc)
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-0132762ee39a93f32
+    Description: Existing Public Subnet ID (public-subnet)
+
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Default: sg-070c00aa2d5a33a21
+    Description: Existing Security Group ID (ec2-sg)
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t2.micro
+      - t3.micro
+      - t3.small
+      - t3.medium
+    Description: EC2 Instance Type
+
+  LatestUbuntuAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id
+    Description: Fetches the latest Canonical Ubuntu 22.04 LTS AMI automatically
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: chanaccess
+    Description: Name of existing EC2 KeyPair for SSH access
+
+Resources:
+  UbuntuEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestUbuntuAmiId
+      KeyName: !Ref KeyPairName
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 10
+            VolumeType: gp3
+            DeleteOnTermination: true
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: '0'
+          GroupSet:
+            - !Ref SecurityGroupId
+          SubnetId: !Ref SubnetId
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+
+          # 1. Update system & install dependencies
+          apt-get update -y
+          apt-get install -y software-properties-common curl git
+
+          # 2. Add Official Ansible PPA & Install Ansible
+          add-apt-repository --yes --update ppa:ansible/ansible
+          apt-get install -y ansible
+
+      Tags:
+        - Key: Name
+          Value: Ubuntu-Ansible-Base
+        - Key: Environment
+          Value: Production
+
+Outputs:
+  InstanceId:
+    Description: Instance ID of the newly created Ubuntu instance
+    Value: !Ref UbuntuEC2Instance
+
+  PublicIP:
+    Description: Public IP address of the Ubuntu instance
+    Value: !GetAtt UbuntuEC2Instance.PublicIp
+
+  PrivateIP:
+    Description: Private IP address of the Ubuntu instance
+    Value: !GetAtt UbuntuEC2Instance.PrivateIp
