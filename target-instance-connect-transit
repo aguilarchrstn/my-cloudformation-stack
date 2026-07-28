@@ -1,0 +1,100 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Modular Stack - Single Target Instance with Parameterized Hostname, Key Injection, and Remote Access
+
+Parameters:
+  TargetHostname:
+    Type: String
+    Default: target-node-01
+    Description: Enter the custom hostname for this server.
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+    Description: Select the EC2 Instance Type.
+
+  TransitPublicKey:
+    Type: String
+    Description: Paste the Transit Host public SSH key (contents of cat ~/.ssh/id_rsa.pub).
+
+  RemoteAccessCIDR:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR IP range allowed to connect remotely via SSH (e.g., 0.0.0.0/0 or your specific IP xx.xx.xx.xx/32).
+
+Resources:
+  # Additional Security Group allowing direct SSH from the specified RemoteAccessCIDR
+  DirectRemoteAccessSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow direct external SSH connection to Target Instance
+      VpcId: !ImportValue TransitVpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref RemoteAccessCIDR
+      Tags:
+        - Key: Name
+          Value: !Sub "SG-DirectRemoteAccess-${TargetHostname}"
+
+  TargetInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: '{{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}}'
+      SubnetId: !ImportValue TransitSubnetId
+      # Assigns both the internal Transit SG and the new direct remote access SG
+      SecurityGroupIds:
+        - !ImportValue TransitTargetSG
+        - !Ref DirectRemoteAccessSG
+      UserData:
+        Fn::Base64:
+          Fn::Sub:
+            - |
+              #!/bin/bash
+              export DEBIAN_FRONTEND=noninteractive
+
+              # 1. Prevent AWS cloud-init from overwriting custom hostname on reboot
+              sed -i 's/preserve_hostname: false/preserve_hostname: true/' /etc/cloud/cloud.cfg
+
+              # 2. Set OS static hostname from Parameter
+              hostnamectl set-hostname ${TargetHostname}
+
+              # 3. Map local IP and Transit Host in /etc/hosts
+              LOCAL_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
+              echo "$LOCAL_IP ${TargetHostname}" >> /etc/hosts
+              echo "${TransitIP} transit" >> /etc/hosts
+
+              # 4. Inject Transit Host's public key into authorized_keys
+              echo "${TransitPublicKey}" >> /home/ubuntu/.ssh/authorized_keys
+              chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys
+              chmod 600 /home/ubuntu/.ssh/authorized_keys
+            - TransitIP: !ImportValue TransitPrivateIP
+      Tags:
+        - Key: Name
+          Value: !Ref TargetHostname
+
+Outputs:
+  InstanceId:
+    Description: Target Instance ID
+    Value: !Ref TargetInstance
+
+  TargetHostname:
+    Description: Assigned Hostname
+    Value: !Ref TargetHostname
+
+  TargetPrivateIP:
+    Description: Private IP Address
+    Value: !GetAtt TargetInstance.PrivateIp
+
+  TargetPublicIP:
+    Description: Direct Public IP Address for Remote SSH
+    Value: !GetAtt TargetInstance.PublicIp
+
+  DirectRemoteSSHCommand:
+    Description: Command to connect directly from your machine
+    Value: !Sub "ssh ubuntu@${TargetInstance.PublicIp}"
