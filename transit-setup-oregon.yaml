@@ -1,0 +1,178 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Modular Stack 1 - VPC and Transit Host with 'transit' hostname mapping
+
+Parameters:
+  KeyName:
+    Type: String
+    Default: transit
+    Description: Name of your existing EC2 Key Pair to access the Transit Host.
+
+  YourIPCIDR:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: IP range allowed to SSH into Transit Host.
+
+Resources:
+  MyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: Transit-VPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: Transit-IGW
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MyVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      Tags:
+        - Key: Name
+          Value: Public-Subnet
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+      Tags:
+        - Key: Name
+          Value: Public-Route-Table
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  TransitHostSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable external SSH to Transit Host
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref YourIPCIDR
+      Tags:
+        - Key: Name
+          Value: SG-TransitHost
+
+  TargetInstancesSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH ONLY from Transit Host
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref TransitHostSG
+      Tags:
+        - Key: Name
+          Value: SG-TargetInstances
+
+  TransitHostInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: '{{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}}'
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref TransitHostSG
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          export DEBIAN_FRONTEND=noninteractive
+
+          # Prevent AWS cloud-init from resetting hostname on reboot
+          sed -i 's/preserve_hostname: false/preserve_hostname: true/' /etc/cloud/cloud.cfg
+
+          # Set static hostname
+          hostnamectl set-hostname transit
+
+          # Map local IP and loopback in /etc/hosts
+          LOCAL_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
+          echo "$LOCAL_IP transit" >> /etc/hosts
+          echo "127.0.0.1 transit" >> /etc/hosts
+
+          # Install packages
+          apt-get update -y
+          apt-get install -y software-properties-common
+          add-apt-repository --yes --update ppa:ansible/ansible
+          apt-get install -y ansible
+
+          # Generate dedicated SSH key pair for targets
+          sudo -u ubuntu ssh-keygen -t rsa -b 2048 -f /home/ubuntu/.ssh/id_rsa -N ""
+
+          # Configure SSH client
+          cat << 'EOF' > /home/ubuntu/.ssh/config
+          Host transit
+            HostName 127.0.0.1
+            User ubuntu
+
+          Host 10.0.*.*
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+          EOF
+          chown ubuntu:ubuntu /home/ubuntu/.ssh/config
+          chmod 600 /home/ubuntu/.ssh/config
+      Tags:
+        - Key: Name
+          Value: Transit-Host-Ubuntu
+
+Outputs:
+  VpcId:
+    Value: !Ref MyVPC
+    Export:
+      Name: TransitVpcId
+
+  SubnetId:
+    Value: !Ref PublicSubnet
+    Export:
+      Name: TransitSubnetId
+
+  TargetSecurityGroup:
+    Value: !Ref TargetInstancesSG
+    Export:
+      Name: TransitTargetSG
+
+  TransitHostPublicIP:
+    Description: Transit Host Public IP
+    Value: !GetAtt TransitHostInstance.PublicIp
+
+  TransitHostPrivateIP:
+    Description: Transit Host Private IP
+    Value: !GetAtt TransitHostInstance.PrivateIp
+    Export:
+      Name: TransitPrivateIP
+
+  CommandToFetchPublicKey:
+    Description: Run this command to copy the generated public SSH key
+    Value: !Sub "ssh -i transit.pem ubuntu@${TransitHostInstance.PublicIp} 'cat ~/.ssh/id_rsa.pub'"
